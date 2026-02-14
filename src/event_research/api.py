@@ -41,6 +41,7 @@ class ResearchRequest(BaseModel):
     notes: str | None = None
     push_to_notion: bool = True
     slack_format: bool = True  # return Slack Block Kit format
+    new_only: bool = False  # skip Notion lookup, only return new web results
 
 
 class ResearchResponse(BaseModel):
@@ -131,7 +132,7 @@ async def research(
 
     # Run research (this is synchronous and takes 30-120s)
     try:
-        result = run_research(brief, config)
+        result = run_research(brief, config, skip_notion_lookup=request.new_only)
     except Exception as e:
         return ResearchResponse(
             status="error",

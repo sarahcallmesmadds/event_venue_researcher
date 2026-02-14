@@ -11,14 +11,14 @@ Get the research agent working end-to-end: give it event criteria, it returns ve
 - [x] Config file for API keys, Notion DB ID, defaults
 - [x] Test end-to-end: CLI input → research → Notion output
 
-## Phase 2: n8n + Slack Integration ← IN PROGRESS
+## Phase 2: n8n + Slack Integration ✅ (code complete, setup at new company)
 Wire the agent into Slack via n8n so you can interact conversationally.
 
 - [x] FastAPI wrapper (POST /research, GET /health)
 - [x] Slack Block Kit message formatter
 - [x] n8n workflow export (Slack trigger → parse → agent API → Slack response)
 - [x] Railway deploy config (Dockerfile + railway.json)
-- [ ] **SETUP REQUIRED — see below**
+- [ ] **SETUP REQUIRED at new company — see below**
 
 ### Phase 2 Setup Steps
 
@@ -54,13 +54,41 @@ DM the Slack bot something like:
 
 The bot will acknowledge, research (1-2 min), and post venue results back.
 
-## Phase 3: Venue Health Checks + Memory
+## Phase 3: Venue Health Checks + Memory ✅
 Make the Notion DB self-maintaining and the agent smarter over time.
 
-- [ ] Scheduled venue validation (still in business? updated info?)
-- [ ] Auto-archive dead venues
-- [ ] Agent checks Notion first before searching externally
-- [ ] Learning from past research (what worked, user feedback)
+- [x] Venue health check agent (web search to verify venues still active)
+- [x] Auto-archive closed venues, update corrected contact info
+- [x] Agent checks Notion first before searching externally (reuses existing venues)
+- [x] `--new-only` flag to skip Notion lookup and only return fresh web results
+- [x] Health check CLI command and API endpoint (`/health-check`)
+- [ ] **SETUP REQUIRED at new company — see below**
+
+### Phase 3 Setup Steps
+
+#### Notion "Team Projects" Relation + Formula
+When you create the **Team Projects** database at your new company, come back and do this:
+
+1. **Add a Relation property** to the "Event Venue Research" DB:
+   - Property name: `Team Projects`
+   - Type: Relation
+   - Related database: your Team Projects DB
+   - This links venues to the events/projects they were used for
+
+2. **Add a Formula property** to the "Event Venue Research" DB:
+   - Property name: `Has Successful Event`
+   - Type: Formula
+   - Formula: `if(length(filter(prop("Team Projects"), current.prop("Status") == "Done" and current.prop("Status") != "Canceled")) > 0, true, false)`
+   - This returns `true` if any linked Team Project has status "Done" (and not "Canceled")
+   - Adjust the property names in the formula to match your actual Team Projects DB schema
+
+> **Note:** These can't be created programmatically until the Team Projects DB exists. The Notion API requires the target database ID when creating a Relation property.
+
+#### Triggering Health Checks
+- **Manual (CLI):** `event-research health-check --limit 10`
+- **Manual (API):** `POST /health-check` on your Railway deployment
+- **From Notion:** Add a button in Notion that calls the Railway `/health-check` endpoint
+- **Scheduled:** Set up an n8n workflow with a Cron trigger to call `/health-check` on a schedule (e.g., weekly)
 
 ## Phase 4: Outreach Agent Handoff
 Prep for the venue outreach agent you mentioned.

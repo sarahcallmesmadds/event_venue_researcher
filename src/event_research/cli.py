@@ -41,6 +41,7 @@ def main():
     research_parser.add_argument("--date", help="Target date range")
     research_parser.add_argument("--notes", help="Additional notes")
     research_parser.add_argument("--no-notion", action="store_true", help="Skip pushing to Notion")
+    research_parser.add_argument("--new-only", action="store_true", help="Skip Notion lookup, only return new web search results")
     research_parser.add_argument("--json-out", help="Save raw JSON results to file")
 
     # --- health-check command ---
@@ -104,7 +105,7 @@ def _handle_research(args):
     ))
 
     # Run research
-    result = run_research(brief, config)
+    result = run_research(brief, config, skip_notion_lookup=args.new_only)
 
     # Display results
     _display_results(result)
