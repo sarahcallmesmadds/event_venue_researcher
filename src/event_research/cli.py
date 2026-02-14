@@ -55,6 +55,7 @@ def main():
     outreach_parser.add_argument("--status", help="Filter by status (default: New + Ready for Outreach)")
     outreach_parser.add_argument("--limit", type=int, default=0, help="Max venues to process (0 = all matching)")
     outreach_parser.add_argument("--enrich-only", action="store_true", help="Only enrich contacts, skip email drafting")
+    outreach_parser.add_argument("--project-url", help="Notion URL of the Team Project page (for event details)")
     outreach_parser.add_argument("--no-notion", action="store_true", help="Skip updating Notion")
     outreach_parser.add_argument("--json-out", help="Save results to JSON file")
     # Event detail overrides for email drafting (used if no linked Team Project)
@@ -223,7 +224,7 @@ def _handle_outreach(args):
 
     from event_research.notion_sync import (
         get_venues_for_outreach, get_notion_client, update_venue_outreach,
-        get_linked_project_content,
+        get_linked_project_content, fetch_page_content,
     )
     from event_research.outreach_agent import run_outreach_batch
 
@@ -265,12 +266,20 @@ def _handle_outreach(args):
             "audience": args.audience,
         }
 
-    # Try to get project content from the first venue's linked Team Project
+    # Try to get project content — CLI --project-url takes priority,
+    # then fall back to the first venue's linked Team Project relation
     project_content = None
     if not event_details:
-        project_content = get_linked_project_content(config, pages[0])
-        if project_content:
-            console.print("[dim]Found linked Team Project — extracting event details...[/dim]")
+        if args.project_url:
+            project_content = fetch_page_content(config, args.project_url)
+            if project_content:
+                console.print("[dim]Fetched project page — extracting event details...[/dim]")
+            else:
+                console.print("[yellow]⚠️  Could not fetch project page content from URL[/yellow]")
+        else:
+            project_content = get_linked_project_content(config, pages[0])
+            if project_content:
+                console.print("[dim]Found linked Team Project — extracting event details...[/dim]")
 
     # Run outreach
     result = run_outreach_batch(

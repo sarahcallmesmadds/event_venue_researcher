@@ -340,6 +340,7 @@ class OutreachRequest(BaseModel):
     city: str | None = None
     venue_name: str | None = None
     page_id: str | None = None  # specific Notion page ID (for trigger-based outreach)
+    project_url: str | None = None  # Notion project page URL or ID (for event details)
     status_filter: list[str] | None = None
     limit: int = 0
     enrich_only: bool = False
@@ -381,7 +382,7 @@ async def outreach(
         from event_research.notion_sync import (
             get_venues_for_outreach, get_venue_by_page_id,
             get_notion_client, update_venue_outreach,
-            get_linked_project_content,
+            get_linked_project_content, fetch_page_content,
         )
         from event_research.outreach_agent import run_outreach_batch
         from event_research.slack_format import format_outreach_for_slack
@@ -421,10 +422,14 @@ async def outreach(
                 "audience": request.audience,
             }
 
-        # Try to get project content from linked Team Project
+        # Try to get project content — explicit project_url takes priority,
+        # then fall back to the first venue's linked Team Project relation
         project_content = None
         if not event_details:
-            project_content = get_linked_project_content(config, pages[0])
+            if request.project_url:
+                project_content = fetch_page_content(config, request.project_url)
+            else:
+                project_content = get_linked_project_content(config, pages[0])
 
         # Run outreach
         result = run_outreach_batch(

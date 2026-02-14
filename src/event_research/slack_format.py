@@ -206,12 +206,12 @@ def format_outreach_for_slack(result: OutreachResult) -> list[dict]:
 
     blocks.append({"type": "divider"})
 
-    # Per-venue: quick-glance info
-    for v in result.venues:
-        # Venue name linked to website
-        name_text = f"*{v.name}*"
+    # Per-venue: quick-glance info (numbered so user can respond with a number)
+    for i, v in enumerate(result.venues, 1):
+        # Venue name linked to website, with number prefix
+        name_text = f"*{i}. {v.name}*"
         if v.website:
-            name_text = f"*<{v.website}|{v.name}>*"
+            name_text = f"*{i}. <{v.website}|{v.name}>*"
 
         # Quick details
         details = []

@@ -258,8 +258,6 @@ def get_linked_project_content(config: Config, venue_page: dict) -> str | None:
 
     Returns the project page content as plain text, or None if no relation exists.
     """
-    notion = get_notion_client(config)
-
     # Check if "Team Projects" relation property exists
     relation_prop = venue_page.get("properties", {}).get("Team Projects", {})
     if relation_prop.get("type") != "relation":
@@ -274,9 +272,23 @@ def get_linked_project_content(config: Config, venue_page: dict) -> str | None:
     if not project_id:
         return None
 
+    return fetch_page_content(config, project_id)
+
+
+def fetch_page_content(config: Config, page_id: str) -> str | None:
+    """Fetch a Notion page's content as plain text by page ID or URL.
+
+    Accepts a page ID (UUID) or a Notion URL like:
+      https://www.notion.so/workspace/Page-Title-abc123def456
+    """
+    notion = get_notion_client(config)
+
+    # Extract page ID from URL if needed
+    page_id = _extract_page_id_from_url(page_id)
+
     try:
         # Fetch the page blocks (content)
-        blocks = notion.blocks.children.list(block_id=project_id)
+        blocks = notion.blocks.children.list(block_id=page_id)
         text_parts = []
         for block in blocks.get("results", []):
             block_type = block.get("type", "")
@@ -299,8 +311,34 @@ def get_linked_project_content(config: Config, venue_page: dict) -> str | None:
         return "\n".join(text_parts) if text_parts else None
 
     except Exception as e:
-        print(f"  \u26a0\ufe0f  Failed to fetch project content: {e}")
+        print(f"  \u26a0\ufe0f  Failed to fetch page content: {e}")
         return None
+
+
+def _extract_page_id_from_url(url_or_id: str) -> str:
+    """Extract a Notion page ID from a URL or return as-is if already an ID.
+
+    Handles URLs like:
+      https://www.notion.so/workspace/Page-Title-abc123def456
+      https://www.notion.so/abc123def456
+      abc123def456 (raw ID, with or without dashes)
+    """
+    import re
+    url_or_id = url_or_id.strip()
+
+    # If it looks like a URL, extract the last 32 hex chars
+    if "notion.so" in url_or_id or "notion.site" in url_or_id:
+        # Remove query params
+        url_or_id = url_or_id.split("?")[0].split("#")[0]
+        # The page ID is the last 32 hex characters in the URL path
+        match = re.search(r'([a-f0-9]{32})$', url_or_id.replace("-", ""))
+        if match:
+            raw = match.group(1)
+            # Format as UUID with dashes
+            return f"{raw[:8]}-{raw[8:12]}-{raw[12:16]}-{raw[16:20]}-{raw[20:]}"
+
+    # Already an ID — return as-is
+    return url_or_id
 
 
 def update_venue_outreach(
