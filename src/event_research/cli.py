@@ -48,6 +48,23 @@ def main():
     health_parser = subparsers.add_parser("health-check", help="Verify venues in Notion are still active")
     health_parser.add_argument("--limit", type=int, default=0, help="Max venues to check (0 = all)")
 
+    # --- outreach command ---
+    outreach_parser = subparsers.add_parser("outreach", help="Enrich venue contacts and draft outreach emails")
+    outreach_parser.add_argument("--city", help="Filter venues by city")
+    outreach_parser.add_argument("--venue", help="Filter by venue name (partial match)")
+    outreach_parser.add_argument("--status", help="Filter by status (default: New + Ready for Outreach)")
+    outreach_parser.add_argument("--limit", type=int, default=0, help="Max venues to process (0 = all matching)")
+    outreach_parser.add_argument("--enrich-only", action="store_true", help="Only enrich contacts, skip email drafting")
+    outreach_parser.add_argument("--no-notion", action="store_true", help="Skip updating Notion")
+    outreach_parser.add_argument("--json-out", help="Save results to JSON file")
+    # Event detail overrides for email drafting (used if no linked Team Project)
+    outreach_parser.add_argument("--type", choices=["dinner", "happy_hour", "workshop"], help="Event type (for email drafting)")
+    outreach_parser.add_argument("--budget", help="Budget (for email drafting)")
+    outreach_parser.add_argument("--guests", type=int, help="Guest count (for email drafting)")
+    outreach_parser.add_argument("--date", help="Target date (for email drafting)")
+    outreach_parser.add_argument("--vibe", help="Vibe (for email drafting)")
+    outreach_parser.add_argument("--audience", help="Audience (for email drafting)")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -61,6 +78,8 @@ def main():
         _handle_research(args)
     elif args.command == "health-check":
         _handle_health_check(args)
+    elif args.command == "outreach":
+        _handle_outreach(args)
 
 
 def _handle_research(args):
@@ -188,6 +207,160 @@ def _handle_health_check(args):
 
     if not results:
         console.print("\n[yellow]No venues to check.[/yellow]")
+
+
+def _handle_outreach(args):
+    config = load_config()
+
+    # Validate config
+    missing = config.validate_keys()
+    if "ANTHROPIC_API_KEY" in missing:
+        console.print("[red]❌ ANTHROPIC_API_KEY is required. Set it in .env[/red]")
+        sys.exit(1)
+    if "NOTION_API_KEY" in missing or "NOTION_DATABASE_ID" in missing:
+        console.print("[red]❌ Notion keys are required for outreach. Set them in .env[/red]")
+        sys.exit(1)
+
+    from event_research.notion_sync import (
+        get_venues_for_outreach, get_notion_client, update_venue_outreach,
+        get_linked_project_content,
+    )
+    from event_research.outreach_agent import run_outreach_batch
+
+    # Build status filter
+    status_filter = None
+    if args.status:
+        status_filter = [s.strip() for s in args.status.split(",")]
+
+    # Query Notion for matching venues
+    pages = get_venues_for_outreach(
+        config,
+        city=args.city,
+        venue_name=args.venue,
+        status_filter=status_filter,
+    )
+
+    if args.limit > 0:
+        pages = pages[:args.limit]
+
+    if not pages:
+        console.print("\n[yellow]No matching venues found in Notion.[/yellow]")
+        if args.city:
+            console.print(f"   City filter: {args.city}")
+        if args.venue:
+            console.print(f"   Venue filter: {args.venue}")
+        return
+
+    console.print(f"\n[bold]Found {len(pages)} venue(s) to process[/bold]")
+
+    # Build event details from CLI args (if provided)
+    event_details = None
+    if args.type or args.budget or args.guests or args.date:
+        event_details = {
+            "event_type": args.type or "private event",
+            "budget": args.budget,
+            "guest_count": args.guests,
+            "date": args.date,
+            "vibe": args.vibe,
+            "audience": args.audience,
+        }
+
+    # Try to get project content from the first venue's linked Team Project
+    project_content = None
+    if not event_details:
+        project_content = get_linked_project_content(config, pages[0])
+        if project_content:
+            console.print("[dim]Found linked Team Project — extracting event details...[/dim]")
+
+    # Run outreach
+    result = run_outreach_batch(
+        pages, config,
+        event_details=event_details,
+        enrich_only=args.enrich_only,
+        project_content=project_content,
+    )
+
+    # Display results
+    _display_outreach_results(result)
+
+    # Save JSON if requested
+    if args.json_out:
+        with open(args.json_out, "w") as f:
+            json.dump(result.model_dump(), f, indent=2, default=str)
+        console.print(f"\n💾 Results saved to {args.json_out}")
+
+    # Update Notion
+    if not args.no_notion:
+        console.print("\n📤 Updating Notion...")
+        notion = get_notion_client(config)
+        updated = 0
+        for venue in result.venues:
+            if venue.page_id:
+                update_venue_outreach(notion, venue.page_id, venue)
+                updated += 1
+        console.print(f"   {updated} venue(s) updated in Notion")
+
+
+def _display_outreach_results(result):
+    """Pretty-print outreach results to the console."""
+    from event_research.models import OutreachResult
+
+    if not result.venues:
+        return
+
+    console.print(f"\n[bold green]Outreach results for {len(result.venues)} venue(s):[/bold green]\n")
+
+    for i, v in enumerate(result.venues, 1):
+        table = Table(show_header=False, box=None, padding=(0, 2))
+        table.add_column("Field", style="bold cyan", width=18)
+        table.add_column("Value")
+
+        if v.address:
+            table.add_row("Address", v.address)
+        if v.website:
+            table.add_row("Website", v.website)
+        if v.price_range:
+            table.add_row("Price Range", v.price_range)
+
+        # Contact info — show original vs enriched
+        table.add_row("", "")  # spacer
+        table.add_row("[bold]Contact Info[/bold]", "")
+
+        contact = v.enriched_contact_name or v.original_contact_name
+        if contact:
+            title_str = f" ({v.enriched_contact_title})" if v.enriched_contact_title else ""
+            new_tag = " [green]NEW[/green]" if v.enriched_contact_name and v.enriched_contact_name != v.original_contact_name else ""
+            table.add_row("Contact", f"{contact}{title_str}{new_tag}")
+
+        email = v.enriched_email or v.original_email
+        if email:
+            new_tag = " [green]NEW[/green]" if v.enriched_email and v.enriched_email != v.original_email else ""
+            table.add_row("Email", f"{email}{new_tag}")
+
+        phone = v.enriched_phone or v.original_phone
+        if phone:
+            new_tag = " [green]NEW[/green]" if v.enriched_phone and v.enriched_phone != v.original_phone else ""
+            table.add_row("Phone", f"{phone}{new_tag}")
+
+        if v.private_events_url:
+            table.add_row("Events Page", v.private_events_url)
+        if v.booking_form_url:
+            table.add_row("Booking Form", v.booking_form_url)
+
+        confidence_color = {"high": "green", "medium": "yellow", "low": "red"}.get(v.enrichment_confidence, "dim")
+        table.add_row("Confidence", f"[{confidence_color}]{v.enrichment_confidence}[/]")
+
+        if v.enrichment_notes:
+            table.add_row("Notes", v.enrichment_notes[:200])
+
+        console.print(Panel(table, title=f"[bold]{i}. {v.name}[/bold] — {v.city}", border_style="cyan"))
+
+        # Show email draft if available
+        if v.email_subject and v.email_body:
+            email_text = f"[bold]Subject:[/bold] {v.email_subject}\n\n{v.email_body}"
+            console.print(Panel(email_text, title="✉️  Draft Email", border_style="dim", padding=(1, 2)))
+
+        console.print("")  # spacer
 
 
 if __name__ == "__main__":
