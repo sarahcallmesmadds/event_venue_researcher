@@ -51,15 +51,35 @@ def _call_with_retry(client, model, messages, max_retries=3):
     )
 
 
-def run_research(brief: EventBrief, config: Config) -> ResearchResult:
+def run_research(brief: EventBrief, config: Config, skip_notion_lookup: bool = False) -> ResearchResult:
     """Run the research agent for a given event brief.
 
-    Uses an agentic loop: Claude searches the web multiple times,
-    then returns structured venue recommendations.
+    First checks Notion for existing matching venues, then searches the web
+    for additional recommendations.
     """
+    # Step 0: Check Notion for existing matches
+    existing_venues = []
+    if not skip_notion_lookup and config.notion_database_id and config.notion_api_key:
+        try:
+            from event_research.notion_lookup import find_matching_venues
+            existing_venues = find_matching_venues(brief, config)
+            if existing_venues:
+                print(f"\n📋 Found {len(existing_venues)} existing venue(s) in Notion that match")
+        except Exception as e:
+            print(f"\n⚠️  Notion lookup failed (continuing with web search): {e}")
+
     client = anthropic.Anthropic(api_key=config.anthropic_api_key)
 
     user_prompt = build_research_prompt(brief)
+
+    # If we have existing venues, tell the agent about them so it doesn't re-research
+    if existing_venues:
+        existing_names = [v.name for v in existing_venues]
+        user_prompt += (
+            f"\n\nNOTE: We already have these venues in our database for this area. "
+            f"Do NOT include them in your results — find NEW venues instead:\n"
+            f"{', '.join(existing_names)}"
+        )
 
     print(f"\n🔍 Researching {brief.event_type.value} venues in {brief.city}...")
     if brief.neighborhood:
@@ -108,7 +128,22 @@ def run_research(brief: EventBrief, config: Config) -> ResearchResult:
     else:
         print(f"   ⚠️  Hit max turns ({MAX_TURNS}), returning what we have...")
 
-    return _parse_response(response, brief)
+    result = _parse_response(response, brief)
+
+    # Combine existing Notion venues with new research results
+    if existing_venues:
+        # Put existing venues first, labeled so the user knows
+        for v in existing_venues:
+            v.highlights = f"[From existing database] {v.highlights or ''}"
+        result.venues = existing_venues + result.venues
+        if result.research_notes:
+            result.research_notes = (
+                f"Found {len(existing_venues)} existing venue(s) in Notion + "
+                f"{len(result.venues) - len(existing_venues)} new from web search. "
+                + result.research_notes
+            )
+
+    return result
 
 
 def _parse_response(response: anthropic.types.Message, brief: EventBrief) -> ResearchResult:

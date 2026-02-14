@@ -43,6 +43,10 @@ def main():
     research_parser.add_argument("--no-notion", action="store_true", help="Skip pushing to Notion")
     research_parser.add_argument("--json-out", help="Save raw JSON results to file")
 
+    # --- health-check command ---
+    health_parser = subparsers.add_parser("health-check", help="Verify venues in Notion are still active")
+    health_parser.add_argument("--limit", type=int, default=0, help="Max venues to check (0 = all)")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -54,6 +58,8 @@ def main():
         start_server(host=args.host, port=args.port)
     elif args.command == "research":
         _handle_research(args)
+    elif args.command == "health-check":
+        _handle_health_check(args)
 
 
 def _handle_research(args):
@@ -163,6 +169,24 @@ def _display_results(result: ResearchResult):
         table.add_row("Confidence", f"[{'green' if v.confidence == 'high' else 'yellow' if v.confidence == 'medium' else 'red'}]{v.confidence}[/]")
 
         console.print(Panel(table, title=f"[bold]{i}. {v.name}[/bold]", border_style="green"))
+
+
+def _handle_health_check(args):
+    config = load_config()
+
+    missing = config.validate_keys()
+    if "ANTHROPIC_API_KEY" in missing:
+        console.print("[red]❌ ANTHROPIC_API_KEY is required. Set it in .env[/red]")
+        sys.exit(1)
+    if "NOTION_API_KEY" in missing or "NOTION_DATABASE_ID" in missing:
+        console.print("[red]❌ Notion keys are required for health checks. Set them in .env[/red]")
+        sys.exit(1)
+
+    from event_research.health_check import run_health_checks
+    results = run_health_checks(config, limit=args.limit)
+
+    if not results:
+        console.print("\n[yellow]No venues to check.[/yellow]")
 
 
 if __name__ == "__main__":

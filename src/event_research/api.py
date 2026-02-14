@@ -281,6 +281,56 @@ async def research_from_message(
     )
 
 
+# ---- Health check endpoint ----
+
+class HealthCheckRequest(BaseModel):
+    limit: int = 0  # 0 = check all venues
+
+
+class HealthCheckResponse(BaseModel):
+    status: str
+    checked: int = 0
+    active: int = 0
+    closed: int = 0
+    uncertain: int = 0
+    results: list[dict] = Field(default_factory=list)
+    error: str | None = None
+
+
+@app.post("/health-check", response_model=HealthCheckResponse)
+async def health_check(
+    request: HealthCheckRequest = HealthCheckRequest(),
+    authorization: str | None = Header(default=None),
+):
+    """Run health checks on venues in Notion."""
+
+    _check_auth(authorization)
+    config = load_config()
+
+    try:
+        from event_research.health_check import run_health_checks
+        results = run_health_checks(config, limit=request.limit)
+
+        return HealthCheckResponse(
+            status="success",
+            checked=len(results),
+            active=sum(1 for r in results if r.status == "active"),
+            closed=sum(1 for r in results if r.status == "closed"),
+            uncertain=sum(1 for r in results if r.status in ("uncertain", "error")),
+            results=[
+                {
+                    "venue_name": r.venue_name,
+                    "city": r.city,
+                    "status": r.status,
+                    "details": r.details,
+                }
+                for r in results
+            ],
+        )
+    except Exception as e:
+        return HealthCheckResponse(status="error", error=str(e))
+
+
 def start_server(host: str = "0.0.0.0", port: int = 8000):
     """Start the API server (used by CLI and Dockerfile)."""
     import uvicorn
