@@ -1,0 +1,196 @@
+{
+  "name": "Event Venue Research Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": ["message"],
+        "additionalFields": {}
+      },
+      "id": "slack-trigger",
+      "name": "Slack Trigger",
+      "type": "n8n-nodes-base.slackTrigger",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "notes": "Triggers on DMs to the bot. Users send event details as a message."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse the incoming Slack message into a research request.\n// Users can type natural language or structured format.\n// This node extracts what it can and passes it to the AI parser.\n\nconst message = $input.first().json;\nconst text = message.text || '';\nconst userId = message.user || '';\nconst channelId = message.channel || '';\n\nreturn [{\n  json: {\n    raw_message: text,\n    user_id: userId,\n    channel_id: channelId,\n  }\n}];"
+      },
+      "id": "extract-message",
+      "name": "Extract Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.RESEARCH_AGENT_URL }}/research",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $env.API_SECRET }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.research_request) }}",
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "id": "call-research-agent",
+      "name": "Call Research Agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 300],
+      "notes": "POST to the FastAPI research agent. Timeout set to 5 min since research takes 1-2 min."
+    },
+    {
+      "parameters": {
+        "channel": "={{ $('Extract Message').first().json.channel_id }}",
+        "text": "={{ $json.status === 'success' ? '✅ Found ' + $json.venue_count + ' venues! Full results below.' : '❌ Research failed: ' + ($json.error || 'Unknown error') }}",
+        "blocksUi": {
+          "blocksValues": []
+        },
+        "otherOptions": {
+          "sendAsJSON": "={{ $json.slack_blocks ? JSON.stringify($json.slack_blocks) : '' }}"
+        }
+      },
+      "id": "slack-response",
+      "name": "Send Slack Response",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1340, 300],
+      "notes": "Posts the research results back to the Slack channel/DM."
+    },
+    {
+      "parameters": {
+        "channel": "={{ $('Extract Message').first().json.channel_id }}",
+        "text": "🔍 Researching venues for you... This usually takes 1-2 minutes. I'll post the results here when done!",
+        "otherOptions": {}
+      },
+      "id": "slack-ack",
+      "name": "Acknowledge Request",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [680, 160],
+      "notes": "Send an immediate acknowledgment so the user knows the bot is working."
+    },
+    {
+      "parameters": {
+        "model": "gpt-4o-mini",
+        "options": {},
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a parser that extracts event research parameters from a natural language message. Extract the following fields and return them as a JSON object:\n\n- event_type: one of \"dinner\", \"happy_hour\", or \"workshop\" (required)\n- city: the city name (required)\n- neighborhood: specific area/neighborhood if mentioned\n- budget: budget amount if mentioned (keep as string, e.g. \"$5,000\")\n- guest_count: number of guests if mentioned (as integer)\n- vibe: atmosphere/vibe keywords if mentioned\n- audience: who is attending if mentioned\n- requirements: list of must-haves if mentioned\n- keywords: any other preference keywords\n- date_range: date/timeframe if mentioned\n- notes: anything else relevant\n- push_to_notion: true\n- slack_format: true\n\nIf you can't determine the event_type or city, set them to null.\n\nReturn ONLY the JSON object, no other text."
+            },
+            {
+              "role": "user",
+              "content": "={{ $json.raw_message }}"
+            }
+          ]
+        }
+      },
+      "id": "parse-intent",
+      "name": "Parse Event Details",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1.8,
+      "position": [680, 300],
+      "notes": "Uses a small/cheap model to parse natural language into structured research request. Replace with Claude if preferred."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate the parsed research request and prepare for API call\n\nconst parsed = JSON.parse($input.first().json.message.content);\n\n// Validate required fields\nif (!parsed.event_type || !parsed.city) {\n  return [{\n    json: {\n      valid: false,\n      error: 'Could not determine event type or city from your message. Please include at least the type of event (dinner, happy hour, or workshop) and the city.',\n      channel_id: $('Extract Message').first().json.channel_id,\n    }\n  }];\n}\n\nreturn [{\n  json: {\n    valid: true,\n    research_request: parsed,\n    channel_id: $('Extract Message').first().json.channel_id,\n  }\n}];"
+      },
+      "id": "validate-request",
+      "name": "Validate Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.valid }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "check-valid",
+      "name": "Is Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1000, 300]
+    },
+    {
+      "parameters": {
+        "channel": "={{ $json.channel_id }}",
+        "text": "={{ $json.error }}",
+        "otherOptions": {}
+      },
+      "id": "slack-error",
+      "name": "Send Error",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1200, 500],
+      "notes": "Send error message if we couldn't parse the request."
+    }
+  ],
+  "connections": {
+    "Slack Trigger": {
+      "main": [
+        [{"node": "Extract Message", "type": "main", "index": 0}]
+      ]
+    },
+    "Extract Message": {
+      "main": [
+        [
+          {"node": "Acknowledge Request", "type": "main", "index": 0},
+          {"node": "Parse Event Details", "type": "main", "index": 0}
+        ]
+      ]
+    },
+    "Parse Event Details": {
+      "main": [
+        [{"node": "Validate Request", "type": "main", "index": 0}]
+      ]
+    },
+    "Validate Request": {
+      "main": [
+        [{"node": "Is Valid?", "type": "main", "index": 0}]
+      ]
+    },
+    "Is Valid?": {
+      "main": [
+        [{"node": "Call Research Agent", "type": "main", "index": 0}],
+        [{"node": "Send Error", "type": "main", "index": 0}]
+      ]
+    },
+    "Call Research Agent": {
+      "main": [
+        [{"node": "Send Slack Response", "type": "main", "index": 0}]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {"name": "event-research"},
+    {"name": "slack-bot"}
+  ]
+}
