@@ -22,6 +22,11 @@ def main():
     parser = argparse.ArgumentParser(description="Event Venue Research Agent")
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
 
+    # --- serve command ---
+    serve_parser = subparsers.add_parser("serve", help="Start the API server")
+    serve_parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
+    serve_parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
+
     # --- research command ---
     research_parser = subparsers.add_parser("research", help="Research venues for an event")
     research_parser.add_argument("--type", required=True, choices=["dinner", "happy_hour", "workshop"], help="Event type")
@@ -44,7 +49,10 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    if args.command == "research":
+    if args.command == "serve":
+        from event_research.api import start_server
+        start_server(host=args.host, port=args.port)
+    elif args.command == "research":
         _handle_research(args)
 
 

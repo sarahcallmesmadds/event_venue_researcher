@@ -1,0 +1,114 @@
+{
+  "name": "Event Venue Research Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": ["message"],
+        "additionalFields": {}
+      },
+      "id": "slack-trigger",
+      "name": "Slack Trigger",
+      "type": "n8n-nodes-base.slackTrigger",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "notes": "Triggers on DMs to the bot. Users send event details as a message."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract the Slack message details\nconst message = $input.first().json;\nreturn [{\n  json: {\n    raw_message: message.text || '',\n    user_id: message.user || '',\n    channel_id: message.channel || '',\n  }\n}];"
+      },
+      "id": "extract-message",
+      "name": "Extract Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "channel": "={{ $json.channel_id }}",
+        "text": "🔍 Researching venues for you... This usually takes 1-2 minutes. I'll post the results here when done!",
+        "otherOptions": {}
+      },
+      "id": "slack-ack",
+      "name": "Acknowledge Request",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [680, 160],
+      "notes": "Send an immediate acknowledgment so the user knows the bot is working."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.RESEARCH_AGENT_URL }}/research-from-message",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $env.API_SECRET }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ message: $('Extract Message').first().json.raw_message, push_to_notion: true, slack_format: true }) }}",
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "id": "call-research-agent",
+      "name": "Call Research Agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 300],
+      "notes": "POST to /research-from-message — our server handles both parsing and research using Claude. No OpenAI needed."
+    },
+    {
+      "parameters": {
+        "channel": "={{ $('Extract Message').first().json.channel_id }}",
+        "text": "={{ $json.status === 'success' ? '✅ Found ' + $json.venue_count + ' venues!' : '❌ ' + ($json.error || 'Research failed') }}",
+        "blocksUi": {
+          "blocksValues": []
+        },
+        "otherOptions": {}
+      },
+      "id": "slack-response",
+      "name": "Send Slack Response",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1120, 300],
+      "notes": "Posts the research results back to the Slack channel/DM. Uses slack_blocks from the API response."
+    }
+  ],
+  "connections": {
+    "Slack Trigger": {
+      "main": [
+        [{"node": "Extract Message", "type": "main", "index": 0}]
+      ]
+    },
+    "Extract Message": {
+      "main": [
+        [
+          {"node": "Acknowledge Request", "type": "main", "index": 0},
+          {"node": "Call Research Agent", "type": "main", "index": 0}
+        ]
+      ]
+    },
+    "Call Research Agent": {
+      "main": [
+        [{"node": "Send Slack Response", "type": "main", "index": 0}]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {"name": "event-research"},
+    {"name": "slack-bot"}
+  ]
+}
