@@ -8,11 +8,12 @@ GET  /health    — health check
 
 from __future__ import annotations
 
+import json
 import os
-import threading
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Header
+import anthropic
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel, Field
 
 from event_research.config import load_config
@@ -159,6 +160,124 @@ async def research(
         venues=[v.dict() for v in result.venues],
         slack_blocks=slack_blocks,
         notion_urls=notion_urls,
+    )
+
+
+# ---- Parse natural language into structured request (using Claude) ----
+
+PARSE_SYSTEM_PROMPT = """\
+You are a parser that extracts event research parameters from a natural language message.
+Extract the following fields and return them as a JSON object:
+
+- event_type: one of "dinner", "happy_hour", or "workshop" (required)
+- city: the city name (required)
+- neighborhood: specific area/neighborhood if mentioned
+- budget: budget amount if mentioned (keep as string, e.g. "$5,000")
+- guest_count: number of guests if mentioned (as integer)
+- vibe: atmosphere/vibe keywords if mentioned
+- audience: who is attending if mentioned
+- requirements: list of must-haves if mentioned
+- keywords: any other preference keywords as a list
+- date_range: date/timeframe if mentioned
+- notes: anything else relevant
+
+If you can't determine the event_type or city, set them to null.
+Return ONLY the JSON object, no other text.
+"""
+
+
+class ParseRequest(BaseModel):
+    message: str
+
+
+class ParseResponse(BaseModel):
+    status: str
+    parsed: dict | None = None
+    error: str | None = None
+
+
+@app.post("/parse", response_model=ParseResponse)
+async def parse_message(
+    request: ParseRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Parse a natural language message into a structured research request using Claude."""
+
+    _check_auth(authorization)
+    config = load_config()
+
+    try:
+        client = anthropic.Anthropic(api_key=config.anthropic_api_key)
+        response = client.messages.create(
+            model="claude-haiku-4-20250414",
+            max_tokens=1000,
+            system=PARSE_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": request.message}],
+        )
+
+        text = response.content[0].text.strip()
+        # Extract JSON
+        if text.startswith("```"):
+            lines = text.split("\n")
+            lines = [l for l in lines if not l.strip().startswith("```")]
+            text = "\n".join(lines)
+
+        parsed = json.loads(text)
+
+        # Validate required fields
+        if not parsed.get("event_type") or not parsed.get("city"):
+            return ParseResponse(
+                status="error",
+                error="Could not determine event type or city from your message. Please include at least the type of event (dinner, happy hour, or workshop) and the city.",
+            )
+
+        return ParseResponse(status="success", parsed=parsed)
+
+    except json.JSONDecodeError:
+        return ParseResponse(status="error", error="Failed to parse the message into structured data.")
+    except Exception as e:
+        return ParseResponse(status="error", error=f"Parse failed: {str(e)}")
+
+
+class MessageResearchRequest(BaseModel):
+    """Send a raw natural language message — we'll parse and research in one call."""
+    message: str
+    push_to_notion: bool = True
+    slack_format: bool = True
+
+
+@app.post("/research-from-message", response_model=ResearchResponse)
+async def research_from_message(
+    request: MessageResearchRequest,
+    authorization: str | None = Header(default=None),
+):
+    """One-shot: parse a natural language message and run venue research.
+
+    This is the simplest n8n integration — just forward the Slack message here.
+    """
+
+    _check_auth(authorization)
+
+    # Step 1: Parse the message
+    parse_result = await parse_message(
+        ParseRequest(message=request.message),
+        authorization=authorization,
+    )
+
+    if parse_result.status != "success" or not parse_result.parsed:
+        return ResearchResponse(
+            status="error",
+            error=parse_result.error or "Could not parse message",
+        )
+
+    # Step 2: Run research with parsed data
+    parsed = parse_result.parsed
+    parsed["push_to_notion"] = request.push_to_notion
+    parsed["slack_format"] = request.slack_format
+
+    return await research(
+        ResearchRequest(**parsed),
+        authorization=authorization,
     )
 
 
