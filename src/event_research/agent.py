@@ -1,8 +1,14 @@
-"""Core research agent — uses Claude with web search to find venues."""
+"""Core research agent — uses Claude with web search to find venues.
+
+Uses an agentic loop so Claude can do multiple rounds of web searching
+before producing the final structured response.
+"""
 
 from __future__ import annotations
 
 import json
+import re
+import time
 import anthropic
 
 from event_research.config import Config
@@ -14,15 +20,42 @@ from event_research.templates.base import SYSTEM_PROMPT, build_research_prompt
 WEB_SEARCH_TOOL = {
     "type": "web_search_20250305",
     "name": "web_search",
-    "max_uses": 20,
+    "max_uses": 30,
 }
+
+MAX_TURNS = 15  # Safety limit on agentic loop iterations
+
+
+def _call_with_retry(client, model, messages, max_retries=3):
+    """Call the API with automatic retry on rate limit errors."""
+    for attempt in range(max_retries):
+        try:
+            return client.messages.create(
+                model=model,
+                max_tokens=8000,
+                system=SYSTEM_PROMPT,
+                tools=[WEB_SEARCH_TOOL],
+                messages=messages,
+            )
+        except anthropic.RateLimitError:
+            wait = 30 * (attempt + 1)
+            print(f"   ⏳ Rate limited — waiting {wait}s before retry ({attempt + 1}/{max_retries})...")
+            time.sleep(wait)
+    # Final attempt without catching
+    return client.messages.create(
+        model=model,
+        max_tokens=8000,
+        system=SYSTEM_PROMPT,
+        tools=[WEB_SEARCH_TOOL],
+        messages=messages,
+    )
 
 
 def run_research(brief: EventBrief, config: Config) -> ResearchResult:
     """Run the research agent for a given event brief.
 
-    Sends the brief to Claude with web search enabled.
-    Claude will search for real venues, verify details, and return structured results.
+    Uses an agentic loop: Claude searches the web multiple times,
+    then returns structured venue recommendations.
     """
     client = anthropic.Anthropic(api_key=config.anthropic_api_key)
 
@@ -35,29 +68,59 @@ def run_research(brief: EventBrief, config: Config) -> ResearchResult:
         print(f"   Budget: {brief.budget}")
     if brief.guest_count:
         print(f"   Guests: {brief.guest_count}")
-    print(f"   Searching (this may take 30-60 seconds)...\n")
+    print(f"   Searching (this may take 1-2 minutes)...\n")
 
-    response = client.messages.create(
-        model=config.model,
-        max_tokens=16000,
-        system=SYSTEM_PROMPT,
-        tools=[WEB_SEARCH_TOOL],
-        messages=[{"role": "user", "content": user_prompt}],
-    )
+    messages = [{"role": "user", "content": user_prompt}]
 
-    # Extract the final text response (after all tool use)
+    # Agentic loop — keep going until Claude stops using tools
+    for turn in range(MAX_TURNS):
+        response = _call_with_retry(client, config.model, messages)
+
+
+        # If Claude is done (no more tool use), break
+        if response.stop_reason == "end_turn":
+            print(f"   ✅ Research complete ({turn + 1} turn(s))")
+            break
+
+        # Otherwise, Claude used tools — add its response and continue
+        # The response content includes both text and tool_use/server_tool_use blocks
+        messages.append({"role": "assistant", "content": response.content})
+
+        # Build tool results for any tool uses in the response
+        # For web_search (server-side tool), results are already in the response
+        # We just need to keep the conversation going
+        tool_results = []
+        for block in response.content:
+            if block.type == "web_search_tool_result":
+                # Server-side tool results are already handled by the API
+                # We include them back so Claude sees its own search results
+                tool_results.append(block)
+
+        if tool_results:
+            messages.append({"role": "user", "content": tool_results})
+            search_count = sum(1 for b in response.content if b.type == "server_tool_use")
+            print(f"   🔎 Turn {turn + 1}: {search_count} web search(es)...")
+        else:
+            # No tool results to feed back — model may have stopped with tool_use
+            # but without server tool results. Just break.
+            print(f"   ⚠️  Turn {turn + 1}: No search results returned, finishing...")
+            break
+    else:
+        print(f"   ⚠️  Hit max turns ({MAX_TURNS}), returning what we have...")
+
     return _parse_response(response, brief)
 
 
 def _parse_response(response: anthropic.types.Message, brief: EventBrief) -> ResearchResult:
     """Parse Claude's response into structured ResearchResult."""
 
-    # Find the text block in the response
-    text_content = None
+    # Collect ALL text blocks from the response (there may be multiple)
+    text_parts = []
     for block in response.content:
         if block.type == "text":
-            text_content = block.text
-            break
+            text_parts.append(block.text)
+
+    text_content = "\n".join(text_parts) if text_parts else None
 
     if not text_content:
         return ResearchResult(
@@ -66,33 +129,12 @@ def _parse_response(response: anthropic.types.Message, brief: EventBrief) -> Res
         )
 
     # Try to extract JSON from the response
-    try:
-        # Handle case where JSON is wrapped in markdown code blocks
-        cleaned = text_content.strip()
-        if cleaned.startswith("```"):
-            # Remove markdown code fences
-            lines = cleaned.split("\n")
-            lines = [l for l in lines if not l.strip().startswith("```")]
-            cleaned = "\n".join(lines)
-
-        data = json.loads(cleaned)
-    except json.JSONDecodeError:
-        # Try to find JSON object in the response
-        start = text_content.find("{")
-        end = text_content.rfind("}") + 1
-        if start >= 0 and end > start:
-            try:
-                data = json.loads(text_content[start:end])
-            except json.JSONDecodeError:
-                return ResearchResult(
-                    brief=brief,
-                    research_notes=f"Could not parse agent response as JSON. Raw response:\n{text_content[:2000]}",
-                )
-        else:
-            return ResearchResult(
-                brief=brief,
-                research_notes=f"No JSON found in agent response. Raw response:\n{text_content[:2000]}",
-            )
+    data = _extract_json(text_content)
+    if data is None:
+        return ResearchResult(
+            brief=brief,
+            research_notes=f"Could not parse agent response as JSON. Raw response:\n{text_content[:3000]}",
+        )
 
     # Parse venues
     venues = []
@@ -117,7 +159,7 @@ def _parse_response(response: anthropic.types.Message, brief: EventBrief) -> Res
                 outdoor_space=v.get("outdoor_space"),
                 cuisine_or_style=v.get("cuisine_or_style"),
                 best_for=v.get("best_for", [brief.event_type.value]),
-                highlights=v.get("highlights"),
+                highlights=_strip_citations(v.get("highlights", "")) or None,
                 source_url=v.get("source_url"),
                 confidence=v.get("confidence", "medium"),
             )
@@ -130,3 +172,39 @@ def _parse_response(response: anthropic.types.Message, brief: EventBrief) -> Res
         venues=venues,
         research_notes=data.get("research_notes"),
     )
+
+
+def _extract_json(text: str) -> dict | None:
+    """Try multiple strategies to extract JSON from the response text."""
+
+    # Strategy 1: Direct parse
+    try:
+        return json.loads(text.strip())
+    except json.JSONDecodeError:
+        pass
+
+    # Strategy 2: Remove markdown code fences
+    cleaned = text.strip()
+    if "```" in cleaned:
+        lines = cleaned.split("\n")
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        try:
+            return json.loads("\n".join(lines))
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 3: Find the outermost JSON object
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start >= 0 and end > start:
+        try:
+            return json.loads(text[start:end])
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
+def _strip_citations(text: str) -> str:
+    """Remove <cite index="...">...</cite> tags, keeping the inner text."""
+    return re.sub(r'<cite[^>]*>(.*?)</cite>', r'\1', text, flags=re.DOTALL)
