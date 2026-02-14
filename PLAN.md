@@ -90,9 +90,38 @@ When you create the **Team Projects** database at your new company, come back an
 - **From Notion:** Add a button in Notion that calls the Railway `/health-check` endpoint
 - **Scheduled:** Set up an n8n workflow with a Cron trigger to call `/health-check` on a schedule (e.g., weekly)
 
-## Phase 4: Outreach Agent Handoff
-Prep for the venue outreach agent you mentioned.
+## Phase 4: Outreach Agent ✅
+Full outreach pipeline — enrich contacts, draft personalized emails, track in Notion.
 
-- [ ] Standardized venue data format for outreach agent
-- [ ] Flag "ready for outreach" in Notion
-- [ ] Outreach agent scaffold
+- [x] Contact enrichment agent (web search for event coordinators, direct emails, private events pages)
+- [x] Email draft generator (personalized outreach emails using venue highlights + event brief)
+- [x] Event details extraction from linked Team Project page content (Claude parses free-form text)
+- [x] Notion status workflow: New → Ready for Outreach → Contacted → Responded → Confirmed / Rejected / Archived
+- [x] New Notion properties: Contact Title, Private Events URL, Booking Form URL, Outreach Email, Outreach Date, Contact Method, Date Last Checked
+- [x] Health check now sets Date Last Checked on every venue it processes
+- [x] CLI command: `event-research outreach` with filters (--city, --venue, --limit, --enrich-only)
+- [x] API endpoint: `POST /outreach` (supports page_id for Notion-triggered outreach)
+- [x] Minimal Slack output (Notion link + venue URL + price range + location)
+- [ ] **SETUP REQUIRED at new company — see below**
+
+### Phase 4 Setup Steps
+
+#### Triggering Outreach
+Outreach can be triggered two ways:
+
+1. **Notion status change** (recommended):
+   - Set up an n8n workflow with a Notion webhook trigger
+   - Trigger fires when a venue's Status changes to "Ready for Outreach"
+   - n8n calls `POST /outreach` on your Railway deployment with the `page_id`
+   - Result posts to Slack with a link to the updated Notion page
+
+2. **Slack command**:
+   - Set up an n8n workflow that listens for "outreach [venue name] [city]" messages
+   - n8n calls `POST /outreach` with `venue_name` and `city` filters
+   - Result posts back to Slack
+
+#### Linking Team Projects
+When you create your Team Projects database:
+1. Add the Relation property to the venues DB (see Phase 3 setup steps)
+2. Link venues to their Team Project page
+3. The outreach agent will automatically read event details from the project page content — no need for structured properties on the projects DB

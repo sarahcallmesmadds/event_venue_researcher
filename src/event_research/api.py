@@ -332,6 +332,141 @@ async def health_check(
         return HealthCheckResponse(status="error", error=str(e))
 
 
+# ---- Outreach endpoint ----
+
+class OutreachRequest(BaseModel):
+    """Request to enrich contacts and draft outreach emails."""
+
+    city: str | None = None
+    venue_name: str | None = None
+    page_id: str | None = None  # specific Notion page ID (for trigger-based outreach)
+    project_url: str | None = None  # Notion project page URL or ID (for event details)
+    status_filter: list[str] | None = None
+    limit: int = 0
+    enrich_only: bool = False
+    push_to_notion: bool = True
+    slack_format: bool = True
+
+    # Event detail overrides (used if no linked Team Project)
+    event_type: str | None = None
+    budget: str | None = None
+    guest_count: int | None = None
+    date_range: str | None = None
+    vibe: str | None = None
+    audience: str | None = None
+
+
+class OutreachResponse(BaseModel):
+    """Response with outreach results."""
+
+    status: str
+    total_processed: int = 0
+    total_enriched: int = 0
+    total_emails_drafted: int = 0
+    venues: list[dict] = Field(default_factory=list)
+    slack_blocks: list[dict] | None = None
+    error: str | None = None
+
+
+@app.post("/outreach", response_model=OutreachResponse)
+async def outreach(
+    request: OutreachRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Enrich venue contacts and draft outreach emails."""
+
+    _check_auth(authorization)
+    config = load_config()
+
+    try:
+        from event_research.notion_sync import (
+            get_venues_for_outreach, get_venue_by_page_id,
+            get_notion_client, update_venue_outreach,
+            get_linked_project_content, fetch_page_content,
+        )
+        from event_research.outreach_agent import run_outreach_batch
+        from event_research.slack_format import format_outreach_for_slack
+
+        # Get venues to process
+        if request.page_id:
+            # Single venue by page ID (for Notion trigger)
+            page = get_venue_by_page_id(config, request.page_id)
+            pages = [page] if page else []
+        else:
+            pages = get_venues_for_outreach(
+                config,
+                city=request.city,
+                venue_name=request.venue_name,
+                status_filter=request.status_filter,
+            )
+
+        if request.limit > 0:
+            pages = pages[:request.limit]
+
+        if not pages:
+            return OutreachResponse(
+                status="success",
+                total_processed=0,
+                venues=[],
+            )
+
+        # Build event details from request
+        event_details = None
+        if request.event_type or request.budget or request.guest_count:
+            event_details = {
+                "event_type": request.event_type or "private event",
+                "budget": request.budget,
+                "guest_count": request.guest_count,
+                "date": request.date_range,
+                "vibe": request.vibe,
+                "audience": request.audience,
+            }
+
+        # Try to get project content — explicit project_url takes priority,
+        # then fall back to the first venue's linked Team Project relation
+        project_content = None
+        if not event_details:
+            if request.project_url:
+                project_content = fetch_page_content(config, request.project_url)
+            else:
+                project_content = get_linked_project_content(config, pages[0])
+
+        # Run outreach
+        result = run_outreach_batch(
+            pages, config,
+            event_details=event_details,
+            enrich_only=request.enrich_only,
+            project_content=project_content,
+        )
+
+        # Update Notion if requested
+        if request.push_to_notion:
+            notion = get_notion_client(config)
+            for venue in result.venues:
+                if venue.page_id:
+                    update_venue_outreach(notion, venue.page_id, venue)
+
+        # Format for Slack if requested
+        slack_blocks = None
+        if request.slack_format:
+            slack_blocks = format_outreach_for_slack(result)
+
+        return OutreachResponse(
+            status="success",
+            total_processed=result.total_processed,
+            total_enriched=result.total_enriched,
+            total_emails_drafted=result.total_emails_drafted,
+            venues=[v.model_dump() for v in result.venues],
+            slack_blocks=slack_blocks,
+        )
+
+    except Exception as e:
+        return OutreachResponse(
+            status="error",
+            error=f"Outreach failed: {str(e)}",
+        )
+
+
 def start_server(host: str = "0.0.0.0", port: int = 8000):
     """Start the API server (used by CLI and Dockerfile)."""
     import uvicorn

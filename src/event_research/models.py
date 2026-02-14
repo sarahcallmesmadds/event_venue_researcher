@@ -59,3 +59,50 @@ class ResearchResult(BaseModel):
     brief: EventBrief
     venues: list[Venue] = Field(default_factory=list)
     research_notes: str | None = None  # agent's summary / thinking
+
+
+class EnrichedVenue(BaseModel):
+    """A venue with enriched contact data and an optional outreach email draft."""
+
+    # Core identity (from Notion)
+    name: str
+    city: str
+    page_id: str | None = None
+    notion_url: str | None = None
+
+    # Original contact info (before enrichment)
+    original_email: str | None = None
+    original_phone: str | None = None
+    original_contact_name: str | None = None
+
+    # Enriched contact info
+    enriched_email: str | None = None
+    enriched_phone: str | None = None
+    enriched_contact_name: str | None = None
+    enriched_contact_title: str | None = None  # e.g. "Events Director"
+    private_events_url: str | None = None
+    booking_form_url: str | None = None
+    enrichment_confidence: str = "medium"
+    enrichment_notes: str | None = None
+
+    # Email draft
+    email_subject: str | None = None
+    email_body: str | None = None
+
+    # Venue context (for display / Slack)
+    highlights: str | None = None
+    website: str | None = None
+    price_range: str | None = None
+    address: str | None = None
+    neighborhood: str | None = None
+
+
+class OutreachResult(BaseModel):
+    """Result of running outreach on one or more venues."""
+
+    venues: list[EnrichedVenue] = Field(default_factory=list)
+    event_details: dict | None = None  # extracted from Team Project page
+    total_processed: int = 0
+    total_enriched: int = 0  # had new contact info found
+    total_emails_drafted: int = 0
+    notes: str | None = None

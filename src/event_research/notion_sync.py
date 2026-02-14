@@ -1,11 +1,16 @@
-"""Notion integration — push venue results, check for duplicates, archive stale venues."""
+"""Notion integration — push venue results, check for duplicates, archive stale venues.
+
+Also handles outreach updates (enriched contacts, email drafts, status changes).
+"""
 
 from __future__ import annotations
+
+from datetime import date
 
 from notion_client import Client as NotionClient
 
 from event_research.config import Config
-from event_research.models import Venue, ResearchResult
+from event_research.models import EnrichedVenue, Venue, ResearchResult
 
 
 def get_notion_client(config: Config) -> NotionClient:
@@ -157,3 +162,274 @@ def get_all_venues(config: Config) -> list[dict]:
         start_cursor = results.get("next_cursor")
 
     return all_pages
+
+
+# ---- Outreach functions ----
+
+def get_venues_for_outreach(
+    config: Config,
+    city: str | None = None,
+    venue_name: str | None = None,
+    status_filter: list[str] | None = None,
+) -> list[dict]:
+    """Query venues that are ready for outreach.
+
+    Args:
+        config: App config
+        city: Filter by city (exact match)
+        venue_name: Filter by venue name (contains match)
+        status_filter: Status values to include (default: New, Ready for Outreach)
+    """
+    notion = get_notion_client(config)
+
+    if status_filter is None:
+        status_filter = ["New", "Ready for Outreach"]
+
+    # Build filter
+    filters = []
+
+    # Status filter (OR across allowed statuses)
+    if len(status_filter) == 1:
+        filters.append({
+            "property": "Status",
+            "select": {"equals": status_filter[0]},
+        })
+    else:
+        filters.append({
+            "or": [
+                {"property": "Status", "select": {"equals": s}}
+                for s in status_filter
+            ]
+        })
+
+    # City filter
+    if city:
+        filters.append({
+            "property": "City",
+            "select": {"equals": city},
+        })
+
+    # Venue name filter (title contains)
+    if venue_name:
+        filters.append({
+            "property": "Name",
+            "title": {"contains": venue_name},
+        })
+
+    # Combine filters
+    query_filter = {"and": filters} if len(filters) > 1 else filters[0] if filters else None
+
+    all_pages = []
+    start_cursor = None
+
+    while True:
+        kwargs = {"database_id": config.notion_database_id}
+        if query_filter:
+            kwargs["filter"] = query_filter
+        if start_cursor:
+            kwargs["start_cursor"] = start_cursor
+
+        try:
+            results = notion.databases.query(**kwargs)
+        except Exception:
+            return []
+
+        all_pages.extend(results["results"])
+
+        if not results.get("has_more"):
+            break
+        start_cursor = results.get("next_cursor")
+
+    return all_pages
+
+
+def get_venue_by_page_id(config: Config, page_id: str) -> dict | None:
+    """Fetch a single venue page by its Notion page ID."""
+    notion = get_notion_client(config)
+    try:
+        return notion.pages.retrieve(page_id=page_id)
+    except Exception as e:
+        print(f"  \u274c Failed to fetch page {page_id}: {e}")
+        return None
+
+
+def get_linked_project_content(config: Config, venue_page: dict) -> str | None:
+    """If the venue has a 'Team Projects' relation, fetch the linked project's content.
+
+    Returns the project page content as plain text, or None if no relation exists.
+    """
+    # Check if "Team Projects" relation property exists
+    relation_prop = venue_page.get("properties", {}).get("Team Projects", {})
+    if relation_prop.get("type") != "relation":
+        return None
+
+    related_pages = relation_prop.get("relation", [])
+    if not related_pages:
+        return None
+
+    # Fetch the first linked project page
+    project_id = related_pages[0].get("id")
+    if not project_id:
+        return None
+
+    return fetch_page_content(config, project_id)
+
+
+def fetch_page_content(config: Config, page_id: str) -> str | None:
+    """Fetch a Notion page's content as plain text by page ID or URL.
+
+    Accepts a page ID (UUID) or a Notion URL like:
+      https://www.notion.so/workspace/Page-Title-abc123def456
+    """
+    notion = get_notion_client(config)
+
+    # Extract page ID from URL if needed
+    page_id = _extract_page_id_from_url(page_id)
+
+    try:
+        # Fetch the page blocks (content)
+        blocks = notion.blocks.children.list(block_id=page_id)
+        text_parts = []
+        for block in blocks.get("results", []):
+            block_type = block.get("type", "")
+            block_data = block.get(block_type, {})
+
+            # Extract text from rich_text arrays in various block types
+            rich_texts = block_data.get("rich_text", [])
+            for rt in rich_texts:
+                plain_text = rt.get("plain_text", "")
+                if plain_text:
+                    text_parts.append(plain_text)
+
+            # Also check for "text" in some block types
+            if "text" in block_data:
+                for rt in block_data["text"]:
+                    plain_text = rt.get("plain_text", "")
+                    if plain_text:
+                        text_parts.append(plain_text)
+
+        return "\n".join(text_parts) if text_parts else None
+
+    except Exception as e:
+        print(f"  \u26a0\ufe0f  Failed to fetch page content: {e}")
+        return None
+
+
+def _extract_page_id_from_url(url_or_id: str) -> str:
+    """Extract a Notion page ID from a URL or return as-is if already an ID.
+
+    Handles URLs like:
+      https://www.notion.so/workspace/Page-Title-abc123def456
+      https://www.notion.so/abc123def456
+      abc123def456 (raw ID, with or without dashes)
+    """
+    import re
+    url_or_id = url_or_id.strip()
+
+    # If it looks like a URL, extract the last 32 hex chars
+    if "notion.so" in url_or_id or "notion.site" in url_or_id:
+        # Remove query params
+        url_or_id = url_or_id.split("?")[0].split("#")[0]
+        # The page ID is the last 32 hex characters in the URL path
+        match = re.search(r'([a-f0-9]{32})$', url_or_id.replace("-", ""))
+        if match:
+            raw = match.group(1)
+            # Format as UUID with dashes
+            return f"{raw[:8]}-{raw[8:12]}-{raw[12:16]}-{raw[16:20]}-{raw[20:]}"
+
+    # Already an ID — return as-is
+    return url_or_id
+
+
+def update_venue_outreach(
+    notion: NotionClient,
+    page_id: str,
+    enriched: EnrichedVenue,
+) -> None:
+    """Update a venue's Notion page with enriched contact data and email draft."""
+    properties: dict = {}
+
+    # Update contact info (only if enriched data is better than original)
+    if enriched.enriched_contact_name:
+        properties["Contact Name"] = {
+            "rich_text": [{"text": {"content": enriched.enriched_contact_name}}]
+        }
+    if enriched.enriched_contact_title:
+        properties["Contact Title"] = {
+            "rich_text": [{"text": {"content": enriched.enriched_contact_title}}]
+        }
+    if enriched.enriched_email:
+        properties["Email"] = {"email": enriched.enriched_email}
+    if enriched.enriched_phone:
+        properties["Phone"] = {"phone_number": enriched.enriched_phone}
+    if enriched.private_events_url:
+        properties["Private Events URL"] = {"url": enriched.private_events_url}
+    if enriched.booking_form_url:
+        properties["Booking Form URL"] = {"url": enriched.booking_form_url}
+
+    # Email draft (truncate to 2000 chars for Notion rich_text limit)
+    if enriched.email_body:
+        email_text = enriched.email_body[:2000]
+        if enriched.email_subject:
+            email_text = f"Subject: {enriched.email_subject}\n\n{email_text}"
+            email_text = email_text[:2000]
+        properties["Outreach Email"] = {
+            "rich_text": [{"text": {"content": email_text}}]
+        }
+
+    # Outreach date
+    properties["Outreach Date"] = {
+        "date": {"start": date.today().isoformat()}
+    }
+
+    # Contact method (prioritize: email > form > phone > website)
+    if enriched.enriched_email or enriched.original_email:
+        method = "Email"
+    elif enriched.booking_form_url:
+        method = "Form"
+    elif enriched.enriched_phone or enriched.original_phone:
+        method = "Phone"
+    else:
+        method = "Website"
+    properties["Contact Method"] = {"select": {"name": method}}
+
+    # Advance status to Ready for Outreach
+    properties["Status"] = {"select": {"name": "Ready for Outreach"}}
+
+    if properties:
+        try:
+            notion.pages.update(page_id=page_id, properties=properties)
+            print(f"      \U0001f4dd Updated in Notion: {', '.join(properties.keys())}")
+        except Exception as e:
+            print(f"      \u26a0\ufe0f  Failed to update Notion: {e}")
+
+
+def update_date_last_checked(notion: NotionClient, page_id: str) -> None:
+    """Set the Date Last Checked property to today."""
+    try:
+        notion.pages.update(
+            page_id=page_id,
+            properties={
+                "Date Last Checked": {
+                    "date": {"start": date.today().isoformat()}
+                }
+            },
+        )
+    except Exception as e:
+        # Silently skip if property doesn't exist yet
+        pass
+
+
+def advance_venue_status(notion: NotionClient, page_id: str, new_status: str) -> None:
+    """Set a venue's status to a new value."""
+    valid = {"New", "Ready for Outreach", "Contacted", "Responded", "Confirmed", "Rejected", "Archived"}
+    if new_status not in valid:
+        print(f"  \u26a0\ufe0f  Invalid status '{new_status}'. Must be one of: {valid}")
+        return
+    try:
+        notion.pages.update(
+            page_id=page_id,
+            properties={"Status": {"select": {"name": new_status}}},
+        )
+    except Exception as e:
+        print(f"  \u274c Failed to update status: {e}")

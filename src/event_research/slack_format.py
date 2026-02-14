@@ -6,7 +6,7 @@ via the Slack API (through n8n or directly).
 
 from __future__ import annotations
 
-from event_research.models import ResearchResult, Venue
+from event_research.models import OutreachResult, ResearchResult, Venue
 
 
 def format_results_for_slack(result: ResearchResult) -> list[dict]:
@@ -164,5 +164,87 @@ def _format_venue_block(index: int, venue: Venue) -> list[dict]:
     })
 
     blocks.append({"type": "divider"})
+
+    return blocks
+
+
+def format_outreach_for_slack(result: OutreachResult) -> list[dict]:
+    """Format outreach results for Slack — minimal output.
+
+    Shows a quick summary with links to Notion + venue URL, price range,
+    and location for each venue. Detailed info lives in Notion.
+    """
+    blocks = []
+
+    if not result.venues:
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "No venues processed for outreach.",
+            },
+        })
+        return blocks
+
+    # Header
+    blocks.append({
+        "type": "header",
+        "text": {
+            "type": "plain_text",
+            "text": f"Outreach ready for {len(result.venues)} venue(s)",
+        },
+    })
+
+    # Summary stats
+    stats = f"Enriched: {result.total_enriched}/{result.total_processed}"
+    if result.total_emails_drafted > 0:
+        stats += f" | Emails drafted: {result.total_emails_drafted}"
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": stats}],
+    })
+
+    blocks.append({"type": "divider"})
+
+    # Per-venue: quick-glance info (numbered so user can respond with a number)
+    for i, v in enumerate(result.venues, 1):
+        # Venue name linked to website, with number prefix
+        name_text = f"*{i}. {v.name}*"
+        if v.website:
+            name_text = f"*{i}. <{v.website}|{v.name}>*"
+
+        # Quick details
+        details = []
+        if v.address:
+            details.append(f"{v.address}")
+        if v.price_range:
+            details.append(f"{v.price_range}")
+
+        # Contact info
+        contact = v.enriched_contact_name or v.original_contact_name
+        email = v.enriched_email or v.original_email
+        phone = v.enriched_phone or v.original_phone
+        contact_parts = []
+        if contact:
+            contact_parts.append(contact)
+        if email:
+            contact_parts.append(email)
+        elif phone:
+            contact_parts.append(phone)
+
+        line = name_text
+        if details:
+            line += f"\n{' · '.join(details)}"
+        if contact_parts:
+            line += f"\n{' · '.join(contact_parts)}"
+
+        # Notion link
+        if v.notion_url:
+            line += f"\n<{v.notion_url}|View in Notion>"
+
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": line},
+        })
 
     return blocks

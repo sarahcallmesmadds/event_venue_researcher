@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import anthropic
 
 from event_research.config import Config
-from event_research.notion_sync import get_all_venues, get_notion_client, archive_venue
+from event_research.notion_sync import get_all_venues, get_notion_client, archive_venue, update_date_last_checked
 
 
 @dataclass
@@ -209,6 +209,9 @@ def run_health_checks(config: Config, limit: int = 0) -> list[HealthCheckResult]
             updated_info=updated_info,
         )
         results.append(result)
+
+        # Update Date Last Checked for every venue we check
+        update_date_last_checked(notion, page_id)
 
         # Take action based on status
         if status == "closed":
